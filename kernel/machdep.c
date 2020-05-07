@@ -68,6 +68,15 @@ static void init_i8259(uint8_t idt_offset)
              inportb(IO_ICU1+ICU_IMR_OFFSET) & (~(1<<2)));
 }
 
+
+
+//实现函数“time_t  sys_time()”，计算用户需要的秒数
+time_t sys_time(){
+    return g_startup_time;
+    
+}
+
+
 /**
  * 初始化i8253定时器
  */
@@ -276,6 +285,7 @@ static void init_gdt(void)
     memset(&tss, 0, sizeof(struct tss));
     tss.ss0  = GSEL_KDATA*sizeof(gdt[0]);
     tss.esp0 = (uint32_t)&tmp_stack;
+    tss.iomap_base = limit; /*no I/O permission map*/
 
     __asm__ __volatile__(
             "movw %0, %%ax\n\t"
@@ -520,10 +530,7 @@ int exception(struct context *ctx)
                 //This exception was eaten by vm86mon and return to vm86 mode
                 return 0;
             else {
-                //This exception cannot be eaten by vm86mon, return to user mode
-                struct context *c=(struct context *)(((uint8_t *)g_task_running)+PAGE_SIZE-
-                                                     sizeof(struct context));
-                **((struct vm86_context **)(c->esp+4)) = *((struct vm86_context *)ctx);
+                //This exception cannot be eaten by vm86mon, return to caller
                 return 1;
             }
         }
@@ -552,13 +559,37 @@ int exception(struct context *ctx)
     case 16://x87 FPU Floating-Point Error
         if(g_task_own_fpu) {
             __asm__ __volatile__("fnsave %0\t\n"::"m"(g_task_own_fpu->fpu));
-            printk("fpu.cwd=0x%04x\r\n", g_task_own_fpu->fpu.cwd);
-            printk("fpu.swd=0x%04x\r\n", g_task_own_fpu->fpu.swd);
-            printk("fpu.twd=0x%04x\r\n", g_task_own_fpu->fpu.twd);
-            printk("fpu.fip=0x%08x\r\n", g_task_own_fpu->fpu.fip);
-            printk("fpu.fcs=0x%04x\r\n", g_task_own_fpu->fpu.fcs);
-            printk("fpu.foo=0x%08x\r\n", g_task_own_fpu->fpu.foo);
-            printk("fpu.fos=0x%04x\r\n", g_task_own_fpu->fpu.fos);
+        }
+    }
+
+    /**
+     * Return to text mode to show the exception.
+     */
+    {
+        struct vm86_context vm86ctx;
+        int mode;
+
+        memset(&vm86ctx, 0, sizeof(vm86ctx));
+        vm86ctx.esp=0x1000;
+        vm86ctx.eax=0x4f03;
+        vm86_call(1, 0x10, &vm86ctx);
+        mode = vm86ctx.ebx & 0x3fff;
+
+        memset(&vm86ctx, 0, sizeof(vm86ctx));
+        vm86ctx.esp=0x1000;
+        vm86ctx.eax=0x4f01;
+        vm86ctx.ecx=mode;
+        vm86ctx.es=0x70; /*XXX*/
+        vm86ctx.edi=0x36;/*XXX*/
+        vm86_call(1, 0x10, &vm86ctx);
+        uint16_t ma = *(uint16_t *)0x736;/*XXX*/
+
+        if((ma>>4)&1) {
+            memset(&vm86ctx, 0, sizeof(vm86ctx));
+            vm86ctx.esp=0x1000;
+            vm86ctx.eax=0x4f02;
+            vm86ctx.ebx=0x8003;/*XXX*/
+            vm86_call(1, 0x10, &vm86ctx);
         }
     }
 
@@ -576,11 +607,89 @@ int exception(struct context *ctx)
     if(ctx->cs & SEL_UPL)
         printk("esp=0x%08x,  ss=0x%04x\r\n", ctx->esp, ctx->ss);
 
+    printk("\r\n");
+
+    switch(ctx->exception) {
+    case 0:
+        printk("Divide Error\r\n");
+        break;
+    case 1:
+        printk("Debug\r\n");
+        break;
+    case 2:
+        printk("NMI\r\n");
+        break;
+    case 3:
+        printk("Breakpoint\r\n");
+        break;
+    case 4:
+        printk("Overflow\r\n");
+        break;
+    case 5:
+        printk("Bound Range\r\n");
+        break;
+    case 6:
+        printk("Invalid Opcode\r\n");
+        break;
+    case 7:
+        printk("Device Not Available\r\n");
+        break;
+    case 8:
+        printk("Double Fault\r\n");
+        break;
+    case 9:
+        printk("Coprocessor Segment Overrun\r\n");
+        break;
+    case 10:
+        printk("Invalid TSS\r\n");
+        break;
+    case 11:
+        printk("Segment Not Present\r\n");
+        break;
+    case 12:
+        printk("Stack Fault\r\n");
+        break;
+    case 13:
+        printk("General Protection\r\n");
+        break;
+    case 14:
+        {
+            uint32_t vaddr;
+            __asm__ __volatile__("movl %%cr2,%0" : "=r" (vaddr));
+            printk("Page Fault when %s 0x%08x in %s mode\r\n",
+                    (ctx->errorcode&2)?"writing":"reading",
+                    vaddr,
+                    (ctx->errorcode&4)?"user":"kernel");
+        }
+        break;
+    case 16:
+        printk("x87 FPU Floating-Point Error\r\n");
+        if(g_task_own_fpu) {
+            printk("fpu.cwd=0x%04x\r\n", g_task_own_fpu->fpu.cwd);
+            printk("fpu.swd=0x%04x\r\n", g_task_own_fpu->fpu.swd);
+            printk("fpu.twd=0x%04x\r\n", g_task_own_fpu->fpu.twd);
+            printk("fpu.fip=0x%08x\r\n", g_task_own_fpu->fpu.fip);
+            printk("fpu.fcs=0x%04x\r\n", g_task_own_fpu->fpu.fcs);
+            printk("fpu.foo=0x%08x\r\n", g_task_own_fpu->fpu.foo);
+            printk("fpu.fos=0x%04x\r\n", g_task_own_fpu->fpu.fos);
+        }
+        break;
+    case 17:
+        printk("Alignment Check\r\n");
+        break;
+    case 18:
+        printk("Machine-Check\r\n");
+        break;
+    case 19:
+        printk("SIMD Floating-Point\r\n");
+        break;
+    default:
+        printk("Unknown exception %d\r\n", ctx->exception);
+        break;
+    }
+
     while(1);
 }
-
-int get_task_nice(int tid);
-int set_task_nice(int tid, int prio);
 
 /**
  * 系统调用分发函数，ctx保存了进入内核前CPU各个寄存器的值
@@ -589,53 +698,51 @@ void syscall(struct context *ctx)
 {
     //printk("task #%d syscalling #%d.\r\n", sys_task_getid(), ctx->eax);
     switch(ctx->eax) {
-    case SYSCALL_sem_create:
-    {
-        int val = *(int*)(ctx->esp + 4);
-        ctx->eax = sys_sem_create(val);
-    }
-    break;
-    case SYSCALL_sem_destroy:
-    {
-        int val = *(int*)(ctx->esp + 4);
-        ctx->eax = sys_sem_destroy(val);
-    }
-    break;
-    case SYSCALL_sem_signal:
-    {
-        int val = *(int*)(ctx->esp + 4);
-        ctx->eax = sys_sem_signal(val);
-    }
-    break;
-    case SYSCALL_sem_wait:
-    {
-        int val = *(int*)(ctx->esp + 4);
-        ctx->eax = sys_sem_wait(val);
-    }
-    break;
-    case SYSCALL_getprio:
-    {
-        int tid = *(int*)(ctx->esp + 4);
-        ctx->eax = get_task_nice(tid);
-    }
-    break;
-    case SYSCALL_setprio:
-    {
-        int tid = *(int*)(ctx->esp + 4);
-        int prio = *(int*)(ctx->esp + 8);
-        ctx->eax = set_task_nice(tid, prio);
-    }
-    break;
-    case SYSCALL_time:
-    {
-        time_t *loc = *(time_t **)(ctx->esp + 4);
-        ctx->eax = sys_time();
-        if (loc != NULL)
-        {
-            *loc = ctx->eax;
+            
+            
+    //first
+    case SYSCALL_time:{
+        time_t*loc = *(time_t **)(ctx->esp+4);
+        ctx->eax=sys_time();
+        if(loc != NULL)
+        *loc = ctx->eax;
         }
-    }
-    break;
+        break;
+    
+    
+    case SYSCALL_getpriority:{
+        int tid=*(int *)(ctx->esp+4);
+        ctx->eax=getpriority(tid);
+        }
+        break;
+    
+    case SYSCALL_setpriority:{
+        int tid=*(int *)(ctx->esp+4);
+        int prio=*(int *)(ctx->esp+8);
+        ctx->eax=setpriority(tid,prio);
+        }
+        break;
+    
+    case SYSCALL_sem_create:{
+            int value=*(int *)(ctx->esp+4);
+            ctx->eax=sys_sem_create(value);
+        }break;
+        
+    case SYSCALL_sem_destroy:{
+            int semid=*(int *)(ctx->esp+4);
+            ctx->eax=sys_sem_destroy(semid);
+        }break;
+        
+    case SYSCALL_sem_wait:{
+            int semid=*(int *)(ctx->esp+4);
+            ctx->eax=sys_sem_wait(semid);
+        }break;
+        
+    case SYSCALL_sem_signal:{
+            int semid=*(int *)(ctx->esp+4);
+            ctx->eax=sys_sem_signal(semid);
+        }break;
+            
     case SYSCALL_task_exit:
         sys_task_exit(*((int *)(ctx->esp+4)));
         break;
@@ -801,6 +908,70 @@ void syscall(struct context *ctx)
         ctx->eax = -ctx->eax;
         break;
     }
+}
+
+/**
+ * page fault处理函数。
+ * 特别注意：此时系统的中断处于打开状态
+ */
+int do_page_fault(struct context *ctx, uint32_t vaddr, uint32_t code)
+{
+    uint32_t prot;
+
+#if VERBOSE
+    printk("PF:0x%08x(0x%04x)", vaddr, code);
+#endif
+
+    /*检查地址是否合法*/
+    prot = page_prot(vaddr);
+    if(prot == -1 || prot == VM_PROT_NONE) {
+#if VERBOSE
+        printk("->ILLEGAL MEMORY ACCESS\r\n");
+#endif
+        return -1;
+    }
+
+    if(code & PTE_V) {
+        /*页面保护引起PF*/
+#if VERBOSE
+        printk("->PROTECTION VIOLATION\r\n");
+#endif
+		return -1;
+    }
+
+    {
+        uint32_t paddr;
+        uint32_t flags = PTE_V;
+
+        if(prot & VM_PROT_WRITE)
+            flags |= PTE_W;
+
+        /*只要访问用户的地址空间，都代表用户模式访问*/
+        if (vaddr < KERN_MIN_ADDR)
+            flags |= PTE_U;
+
+        /*搜索空闲帧*/
+        paddr = frame_alloc(1);
+        if(paddr != SIZE_MAX) {
+            /*找到空闲帧*/
+            *vtopte(vaddr) = paddr|flags;
+            memset((void *)(PAGE_TRUNCATE(vaddr)), 0, PAGE_SIZE);
+            invlpg(vaddr);
+
+#if VERBOSE
+            printk("->0x%08x\r\n", *vtopte(vaddr));
+#endif
+
+            return 0;
+        } else {
+            /*物理内存已耗尽*/
+#if VERBOSE
+            printk("->OUT OF RAM\r\n");
+#endif
+        }
+    }
+
+    return -1;
 }
 
 /**
@@ -998,44 +1169,4 @@ void cstart(uint32_t magic, uint32_t mbi)
      * 机器无关（Machine Independent）的初始化
      */
     mi_startup();
-}
-
-time_t sys_time()
-{
-    return g_startup_time + g_timer_ticks / HZ;
-}
-
-extern struct tcb* get_task_protected(int tid);
-int get_task_nice(int tid)
-{
-    struct tcb *task;
-    if (tid == 0)
-    {
-        task = g_task_running;
-    }
-    else
-    {
-        task = get_task_protected(tid);
-    }
-    if(task == NULL){ return -1; }
-    return task->nice + NZERO;
-}
-int set_task_nice(int tid, int prio)
-{
-    if(prio >= 0 && prio < 2 * NZERO)
-    {
-        struct tcb *task;
-        if(tid == 0)
-        {
-            task = g_task_running;
-        }
-        else
-        {
-            task = get_task_protected(tid);
-        }
-        if(task == NULL) { return -1; }
-        task->nice = prio - NZERO;
-        return 0;
-    }
-    return -1;
 }

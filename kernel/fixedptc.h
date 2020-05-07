@@ -103,7 +103,6 @@ typedef	__uint128_t fixedptud;
 #define fixedpt_fromint(I) ((fixedptd)(I) << FIXEDPT_FBITS)
 #define fixedpt_toint(F) ((F) >> FIXEDPT_FBITS)
 #define fixedpt_add(A,B) ((A) + (B))
-#define fixedpt_inc(A) ((A) + FIXEDPT_ONE)
 #define fixedpt_sub(A,B) ((A) - (B))
 #define fixedpt_xmul(A,B)						\
 	((fixedpt)(((fixedptd)(A) * (fixedptd)(B)) >> FIXEDPT_FBITS))

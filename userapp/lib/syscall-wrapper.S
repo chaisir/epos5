@@ -24,9 +24,13 @@ WRAPPER(getchar)
 WRAPPER(recv)
 WRAPPER(send)
 WRAPPER(ioctl)
+
+//first
 WRAPPER(time)
-WRAPPER(getprio)
-WRAPPER(setprio)
+
+WRAPPER(getpriority)
+WRAPPER(setpriority)
+
 WRAPPER(sem_create)
 WRAPPER(sem_destroy)
 WRAPPER(sem_wait)

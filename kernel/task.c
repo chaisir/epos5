@@ -20,7 +20,6 @@
 #include <stddef.h>
 #include <string.h>
 #include "kernel.h"
-#include "fixedptc.h"
 
 int g_resched;
 struct tcb *g_task_head;
@@ -28,69 +27,57 @@ struct tcb *g_task_running;
 struct tcb *task0;
 struct tcb *g_task_own_fpu;
 
-fixedpt g_load_avg = 0;
-void priority_tally(struct tcb *t, void* s);
-
-struct schedule_param
-{
-    struct tcb* select;
-};
-
-
 /**
- * CPU调度器函数
+ * CPU调度器函数，这里只实现了轮转调度算法
  *
  * 注意：该函数的执行不能被中断
  */
 void schedule()
 {
-    struct schedule_param p;
-    p.select = task0;
-    traverse_task(&priority_tally, &p);
+//    struct tcb *select = g_task_running;
+//    do {
+//        select = select->next;
+//        if(select == NULL)
+//            select = g_task_head;
+//        if(select == g_task_running)
+//            break;
+//        if((select->tid != 0) &&
+//           (select->state == TASK_STATE_READY))
+//            break;
+//    } while(1);
     
-    // do {
-    //     select = select->next;
-    //     if(select == NULL)
-    //         select = g_task_head;
-    //     if(select == g_task_running)
-    //         break;
-    //     if((select->tid != 0) &&
-    //        (select->state == TASK_STATE_READY))
-    //         break;
-    // } while(1);
+    struct tcb *select=g_task_running;
+    struct tcb *chain=g_task_head;
+    
+    select=g_task_head;
+    while(select!=NULL){
+        select->priority=PRI_USER_MAX-fixedpt_toint(fixedpt_div(select->estcpu, fixedpt_fromint(4)))-select->nice*2;
+        select=select->next;
+    }
+    select=g_task_running;
+    while(1){
+        chain=chain->next;
+        if(chain==NULL)
+            break;
+        if(chain->tid !=0 && chain->state ==TASK_STATE_READY){
+            if(chain->priority > select->priority || select->tid==0)
+                select=chain;
+        }
+    }
 
-    // if(select == g_task_running) {
-    //     if(select->state == TASK_STATE_READY)
-    //         return;
-    //     select = task0;
-    // }
+    if(select == g_task_running) {
+        if(select->state == TASK_STATE_READY)
+            return;
+        select = task0;
+    }
 
     //printk("0x%d -> 0x%d\r\n", (g_task_running == NULL) ? -1 : g_task_running->tid, select->tid);
 
-    if(p.select->signature != TASK_SIGNATURE)
-        printk("warning: kernel stack of task #%d overflow!!!", p.select->tid);
+    if(select->signature != TASK_SIGNATURE)
+        printk("warning: kernel stack of task #%d overflow!!!", select->tid);
 
     g_resched = 0;
-    switch_to(p.select);
-}
-
-// This method is passed as pointer to traverse_task() method. See below.
-// This method updates the priority of each task, and simultaneously selects a task for running
-//   based on their priority.
-void priority_tally(struct tcb *t, void* s)
-{
-    if(t->tid != 0)
-    {
-        int pri = PRI_USER_MAX - fixedpt_toint(fixedpt_div(t->estcpu, fixedpt_fromint(4))) - (t->nice * 2);
-        if(pri < PRI_USER_MIN) { pri = PRI_USER_MIN; }
-        else if(pri > PRI_USER_MAX) { pri = PRI_USER_MAX; }
-        t->priority = pri;
-    }
-    struct schedule_param* p = (struct schedule_param*)s;
-    if(t->state == 1 && t->priority >= p->select->priority)
-    {
-        p->select = t;
-    }
+    switch_to(select);
 }
 
 /**
@@ -192,39 +179,6 @@ struct tcb* get_task(int tid)
     return tsk;
 }
 
-// This method wraps the get_task() method, saving and restoring flags automatically.
-struct tcb* get_task_protected(int tid)
-{
-    uint32_t flags;
-    struct tcb *tsk;
-    save_flags_cli(flags);
-    tsk = get_task(tid);
-    restore_flags(flags);
-    return tsk;
-}
-
-// This method traverses the task list, invoking the specifed operation on every node.
-// The initState pointer will be passed as the state parameter to the function pointer. 
-// Use it in your function to persist state.
-void traverse_task(void (func)(struct tcb*, void*), void* initState)
-{
-    struct tcb* curr = g_task_running;
-    if(curr == NULL) { return; }
-    int initId = curr->tid;
-    void* s = initState;
-    
-    while(1)
-    {
-        func(curr, s);
-        curr = curr->next;
-        if(curr == NULL) 
-        { 
-            curr = g_task_head; 
-        }
-        if(curr->tid == initId) { break; }
-    }
-}
-
 /**
  * 系统调用task_create的执行函数
  *
@@ -253,14 +207,16 @@ struct tcb *sys_task_create(void *tos,
     new->kstack = (uint32_t)(p+PAGE_SIZE);
     new->tid = tid++;
     new->state = TASK_STATE_READY;
-    new->nice = 0;
-    new->estcpu = 0;
-    new->priority = 0;
     new->timeslice = TASK_TIMESLICE_DEFAULT;
     new->wq_exit = NULL;
     new->next = NULL;
     new->signature = TASK_SIGNATURE;
+    
+    new->nice=0;
+    new->priority=0;
+    new->estcpu=0;
 
+    
     /*XXX - should be elsewhere*/
     new->fpu.cwd = 0x37f;
     new->fpu.twd = 0xffff;
@@ -376,4 +332,31 @@ void init_task()
      * 创建线程task0，即系统空闲线程
      */
     task0 = sys_task_create(NULL, NULL/*task0执行的函数将由run_as_task0填充*/, NULL);
+}
+
+
+int getpriority(int tid){
+    uint32_t flags; struct tcb *tsk;
+    save_flags_cli(flags);
+    tsk = get_task(tid);
+    restore_flags(flags);
+    if(tsk==NULL)
+        return -1;
+    else
+        return tsk->nice+NZERO;
+}
+
+int setpriority(int tid,int prio){
+    uint32_t flags; struct tcb *tsk;
+    save_flags_cli(flags);
+    tsk = get_task(tid);
+    restore_flags(flags);
+    if(tsk==NULL)
+        return -1;
+    if(prio>=0 && prio<=(2*NZERO-1)){
+        tsk->nice=prio-NZERO;
+        return 0;
+    }
+    else
+        return -1;
 }

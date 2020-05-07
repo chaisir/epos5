@@ -20,41 +20,46 @@
 #include <stddef.h>
 #include <time.h>
 #include "kernel.h"
-#include "fixedptc.h"
 
 /*记录系统启动以来，定时器中断的次数*/
 unsigned volatile g_timer_ticks = 0;
-extern fixedpt g_load_avg;
-void task_stat(struct tcb* task, void* state);
+
+fixedpt g_load_avg=0;
 
 /**
  * 定时器的中断处理程序
  */
 void isr_timer(uint32_t irq, struct context *ctx)
 {
+    struct tcb *select=g_task_running;
     g_timer_ticks++;
     //sys_putchar('.');
-
-    if (g_task_running != NULL && g_task_running->tid != 0)
-    {
-        g_task_running->estcpu = fixedpt_inc(g_task_running->estcpu);
-    }
-
-    if(g_timer_ticks % HZ == 0)
-    {
-        int nready = 0;
-        traverse_task(&task_stat, &nready);
-        nready--; // task0 is always ready.
-        fixedpt r59_60 = fixedpt_div(fixedpt_fromint(59), fixedpt_fromint(60));
-        fixedpt r01_60 = fixedpt_div(FIXEDPT_ONE, fixedpt_fromint(60));
-        g_load_avg = fixedpt_add(fixedpt_mul(r59_60, g_load_avg), fixedpt_mul(r01_60, fixedpt_fromint(nready)));
-    }
 
     if(g_task_running != NULL) {
         //如果是task0在运行，则强制调度
         if(g_task_running->tid == 0) {
             g_resched = 1;
-        } else {
+        }
+        else{
+            g_task_running->estcpu=fixedpt_add(g_task_running->estcpu,FIXEDPT_ONE);
+            if(g_timer_ticks%HZ==0){
+                select=g_task_head;
+                int nready=0;
+                while(select!=NULL){
+                    if(select->state==TASK_STATE_READY)
+                        nready++;
+                    fixedpt ratio;
+                    ratio = fixedpt_mul(FIXEDPT_TWO, g_load_avg);
+                    ratio = fixedpt_div(ratio, fixedpt_add(ratio, FIXEDPT_ONE));
+                    select->estcpu =fixedpt_add(fixedpt_mul(ratio,select->estcpu),fixedpt_fromint(select->nice));
+                    select=select->next;
+                }
+                
+                fixedpt r59_60 = fixedpt_div(fixedpt_fromint(59), fixedpt_fromint(60));
+                fixedpt r01_60 = fixedpt_div(FIXEDPT_ONE,fixedpt_fromint(60));
+                g_load_avg = fixedpt_add(fixedpt_mul(r59_60, g_load_avg),fixedpt_mul(r01_60, fixedpt_fromint(nready)));
+
+            }
             //否则，把当前线程的时间片减一
             --g_task_running->timeslice;
 
@@ -64,23 +69,6 @@ void isr_timer(uint32_t irq, struct context *ctx)
                 g_task_running->timeslice = TASK_TIMESLICE_DEFAULT;
             }
         }
-    }
-}
-
-// This method is passed as pointer to traverse_task() method. See that method in task.c
-// This method update the estcpu field for each task, and tally tasks in ready state.
-void task_stat(struct tcb* task, void* nready)
-{
-    if(task->state == 1)
-    {
-        *((int*)nready) += 1;
-    }
-    if(task->state != 2)
-    {
-        fixedpt g_load_avg_2 = fixedpt_mul(g_load_avg, FIXEDPT_TWO);
-        fixedpt i = fixedpt_div(g_load_avg_2, fixedpt_inc(g_load_avg_2));
-        i = fixedpt_mul(i, task->estcpu);
-        task->estcpu = fixedpt_add(i, fixedpt_fromint(task->nice));
     }
 }
 
@@ -165,7 +153,7 @@ static void _delay (unsigned num, unsigned denom)
 {
   /* Scale the numerator and denominator down by 1000 to avoid
      the possibility of overflow. */
-  busy_wait (loops_per_tick * num / 1000 * HZ / (denom / 1000));
+  busy_wait (loops_per_tick / (denom / 1000) * (num / 1000) * HZ);
 }
 
 static void do_sleep (unsigned num, unsigned denom)

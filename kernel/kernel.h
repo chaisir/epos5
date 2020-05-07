@@ -20,6 +20,11 @@
 #ifndef _KERNEL_H
 #define _KERNEL_H
 
+#define NZERO 20
+#define PRI_USER_MIN 0
+#define PRI_USER_MAX 127
+
+
 #include <sys/types.h>
 #include <inttypes.h>
 #include <time.h>
@@ -74,20 +79,17 @@ time_t mktime(struct tm *tm);
 struct tcb {
     /*hardcoded*/
     uint32_t    kstack;      /*saved top of the kernel stack for this task*/
-
+    
+    int nice;       //静态优先级
+    int priority;   //动态优先级
+    fixedpt estcpu; //线程最近使用CPU时间
+    
+    
     int         tid;         /* task id */
     int         state;       /* -1:waiting,0:running,1:ready,2:zombie */
 #define TASK_STATE_WAITING  -1
 #define TASK_STATE_READY     1
 #define TASK_STATE_ZOMBIE    2
-
-    int         nice;
-#define NZERO               20
-    int         priority;
-#define PRI_USER_MIN        0
-#define PRI_USER_MAX        127
-
-    fixedpt     estcpu;
 
     int         timeslice;   //时间片
 #define TASK_TIMESLICE_DEFAULT 4
@@ -168,7 +170,6 @@ int     sys_putchar(int c);
 int     sys_getchar();
 
 struct tcb *sys_task_create(void *tos, void (*func)(void *pv), void *pv);
-void        traverse_task(void (func)(struct tcb*, void*), void* initState);
 void        sys_task_exit(int code_exit);
 int         sys_task_wait(int tid, int *pcode_exit);
 int         sys_task_getid();
@@ -201,10 +202,24 @@ unsigned sys_sleep(unsigned seconds);
 int      sys_nanosleep(const struct timespec *rqtp, struct timespec *rmtp);
 
 void     mi_startup();
-
-int sys_sem_create(int);
-int sys_sem_destroy(int);
-int sys_sem_wait(int);
-int sys_sem_signal(int);
-
 #endif /*_KERNEL_H*/
+
+//first
+time_t sys_time();
+
+
+int getpriority(int tid);
+int setpriority(int tid,int prio);
+
+//信号量
+struct Semaphore{
+    int value;
+    int semid;
+    struct Semaphore *next;
+    struct wait_queue *waitqueue;
+};
+
+int sys_sem_create(int value);
+int sys_sem_destroy(int semid);
+int sys_sem_wait(int semid);
+int sys_sem_signal(int semid);

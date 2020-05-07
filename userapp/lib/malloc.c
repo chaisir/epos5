@@ -1,3 +1,4 @@
+#include <string.h>
 #include "../lib/tlsf/tlsf.h"
 
 tlsf_t g_heap;
@@ -8,7 +9,10 @@ void *malloc(size_t bytes)
 }
 void *calloc(size_t num, size_t bytes)
 {
-    return malloc(num*bytes);
+    void *p = malloc(num*bytes);
+    if(p != NULL)
+        memset(p, 0, num*bytes);
+    return p;
 }
 void* memalign(size_t align, size_t bytes)
 {

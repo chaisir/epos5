@@ -31,6 +31,9 @@
 #define SYSCALL_sleep         9
 #define SYSCALL_nanosleep     10
 
+#define SYSCALL_getpriority   22
+#define SYSCALL_setpriority   23
+
 #define SYSCALL_beep          181
 #define SYSCALL_vm86          182
 #define SYSCALL_recv          183
@@ -40,14 +43,11 @@
 #define SYSCALL_putchar       1000
 #define SYSCALL_getchar       1001
 
-#define SYSCALL_time          2013
-
-#define SYSCALL_getprio       4444
-#define SYSCALL_setprio       4445
-
-#define SYSCALL_sem_create    4446
-#define SYSCALL_sem_destroy   4447
-#define SYSCALL_sem_wait      4448
-#define SYSCALL_sem_signal    4449
-
 #endif /*_SYSCALLNR_H*/
+
+#define SYSCALL_time      2013
+
+#define SYSCALL_sem_create 2014
+#define SYSCALL_sem_destroy 2015
+#define SYSCALL_sem_wait 2016
+#define SYSCALL_sem_signal 2017

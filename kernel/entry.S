@@ -264,8 +264,19 @@ exception_common:
     cmpl $0, %eax
     je 4f
 
+    movl %esp, %esi
+    movl $22, %ecx
     addl $(22*4), %esp
-    ret # return from sys_vm86 to syscall
+    movl 20(%esp), %edi
+    cld
+    rep movsd
+
+    popl %edi
+    popl %esi
+    popl %ebx
+    popl %ebp
+
+    ret # return from sys_vm86
 
 4:
     jmp _ret_from_syscall
@@ -439,7 +450,11 @@ _lidt:
 
     .globl _sys_vm86
 _sys_vm86:
-    movl 4(%esp), %esi
+    pushl %ebp
+    pushl %ebx
+    pushl %esi
+    pushl %edi
+    movl 20(%esp), %esi
     subl $(22*4), %esp
     movl %esp, %edi
     movl $22, %ecx

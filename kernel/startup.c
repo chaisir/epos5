@@ -167,7 +167,7 @@ void mi_startup()
     uint32_t brk;
 
     printk("Welcome to EPOS\r\n");
-    printk("Copyright (C) 2005-2015 MingJian Hong<hongmingjian@gmail.com>\r\n");
+    printk("Copyright (C) 2005-2020 MingJian Hong<hongmingjian@gmail.com>\r\n");
     printk("All rights reserved.\r\n\r\n");
 
     {
