@@ -1,0 +1,595 @@
+/*
+ * vim: filetype=c:fenc=utf-8:ts=4:et:sw=4:sts=4
+ */
+#include <inttypes.h>
+#include <stddef.h>
+#include <math.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <syscall.h>
+#include <netinet/in.h>
+#include <stdlib.h>
+#include "graphics.h"
+
+#define THREAD_STACK_SIZE 1024*1024
+#define ARRAY_SIZE 130
+#define MAX_VALUE 255
+#define PANEL_COUNT 4
+#define SWAP_SLEEP_MS 10
+#define GENERATE_SLEEP_MS 150
+#define BACKGROUND RGB(48,48,48)
+#define NICE_VISUALIZATION_HEIGHT 64
+#define NICE_VISUALIZATION_CELL_MARGIN 2
+#define NICE_VISUALIZATION_BACKGROUND RGB(64,64,64)
+#define NICE_CONTROL_LEVEL_COUNT 40
+#define WORKER_INIT_PRIORITY 20
+#define IDLE_PRIORITY 38
+
+extern void *tlsf_create_with_pool(void* mem, size_t bytes);
+extern void test_allocator();
+extern void *g_heap;
+
+int create_task();
+int inline abs();
+double inline absd();
+void draw_line_offset();
+COLORREF HSV(int, int, int);
+void mssleep(int);
+void draw_swap();
+void draw_values();
+void quicksort();
+int quicksort_part();
+void bubble_sort();
+void quicksort_ex();
+void select_sort();
+void print_credits();
+void fill_canvas();
+void draw_control();
+int nice_inc();
+int nice_dec();
+void control_ex();
+void consumer_ex();
+void producer_ex();
+
+
+typedef struct canvas
+{
+    int x1;
+    int y1;
+    int width;
+    int height;
+} canvas;
+
+typedef struct sort_param
+{
+    int array[ARRAY_SIZE];
+    void *stack;
+    int task_id;
+    canvas c;
+    COLORREF *swatch;
+    canvas controlPanel;
+} sort_param;
+sort_param create_sort_param()
+{
+    sort_param parameter;
+    parameter.stack = NULL;
+    parameter.task_id = 0;
+    return parameter;
+}
+
+typedef struct sort_buffer
+{
+    struct sort_buffer* next;
+    COLORREF *swatch;
+    int mutex;
+    canvas c;
+    int array[ARRAY_SIZE];
+} sort_buffer;
+
+typedef struct control_param
+{
+    int control_task_id;
+    int task_id;
+    canvas controlPanel;
+    COLORREF *swatch;
+    void *stack;
+} control_param;
+
+typedef struct con_pro_param
+{
+    void *stack;
+    int task_id;
+    sort_buffer *buffers;
+    int fullSem;
+    int emptySem;
+} con_pro_param;
+
+void cleanup_sort_param(sort_param *p)
+{
+    free(p->stack);
+}
+
+
+/**
+ * GCC insists on __main
+ *    http://gcc.gnu.org/onlinedocs/gccint/Collect2.html
+ */
+void __main()
+{
+    size_t heap_size = 32*1024*1024;
+    void  *heap_base = mmap(NULL, heap_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+	g_heap = tlsf_create_with_pool(heap_base, heap_size);
+}
+
+/**
+ * 第一个运行在用户模式的线程所执行的函数
+ */
+void main(void *pv)
+{
+    srand(time(NULL));
+
+    init_graphic(0x0143);
+    int resX = g_graphic_dev.XResolution;
+    int resY = g_graphic_dev.YResolution;
+    int panelWidth = resX / PANEL_COUNT;
+    int controlPanelWidth = resX / 2;
+
+    int i = 0;
+    COLORREF swatch[256];
+    for(i = 0; i < 256; i++)
+    {
+        swatch[i] = HSV(i, 255, 192);
+    }
+
+    sort_buffer buffers[PANEL_COUNT];
+    for(i = 0; i < PANEL_COUNT; i++)
+    {
+        sort_buffer b;
+
+        canvas panel;
+        panel.y1 = 0;
+        panel.x1 = panelWidth * i;
+        panel.height = resY - NICE_VISUALIZATION_HEIGHT;
+        panel.width = panelWidth;
+        b.c = panel;
+        fill_canvas(&panel, BACKGROUND);
+        b.swatch = swatch;
+        b.mutex = sem_create(1);
+
+        b.next = buffers + i + 1;
+        buffers[i] = b;
+    }
+    buffers[PANEL_COUNT - 1].next = &(buffers[0]);
+
+    int emptySemaphoreId = sem_create(PANEL_COUNT);
+    int fullSemaphoreId = sem_create(0);
+
+    con_pro_param cpParams[2];
+    control_param ctrlParams[2];
+    for(i = 0; i < 2; i++)
+    {
+        cpParams[i].emptySem = emptySemaphoreId;
+        cpParams[i].fullSem = fullSemaphoreId;
+        cpParams[i].buffers = buffers;
+
+        canvas ctrl;
+        ctrl.y1 = resY - NICE_VISUALIZATION_HEIGHT;
+        ctrl.x1 = controlPanelWidth * i;
+        ctrl.width = controlPanelWidth;
+        ctrl.height = NICE_VISUALIZATION_HEIGHT;
+        fill_canvas(&ctrl, NICE_VISUALIZATION_BACKGROUND);
+        ctrlParams[i].controlPanel = ctrl;
+        
+        ctrlParams[i].swatch = swatch;
+
+        if(i == 0)
+        {
+            cpParams[i].task_id = create_task(&producer_ex, &(cpParams[i]), cpParams[i].stack);
+        }
+        else
+        {
+            cpParams[i].task_id = create_task(&consumer_ex, &(cpParams[i]), cpParams[i].stack);
+        }
+        ctrlParams[i].task_id = cpParams[i].task_id;
+        ctrlParams[i].control_task_id = create_task(&control_ex, ctrlParams, ctrlParams[i].stack);
+        draw_control(&ctrlParams[i].controlPanel, getprio(ctrlParams[i].task_id), NICE_VISUALIZATION_BACKGROUND, swatch);
+    }
+    task_wait(cpParams[0].task_id, NULL);
+    task_wait(cpParams[1].task_id, NULL);
+
+    mssleep(2000);
+    exit_graphic();
+
+    print_credits();
+    
+    while(1);
+        
+    task_exit(0);
+}
+
+int create_task(void (*func)(void *pv), void *pv, unsigned char *tos)
+{
+    unsigned char* stack = malloc(THREAD_STACK_SIZE);
+    int id = task_create(stack + THREAD_STACK_SIZE, func, pv);
+    tos = stack;
+    return id;
+}
+
+void draw_line_offset(canvas *c, int x1, int y1, int x2, int y2, COLORREF color)
+{
+    line(x1 + c->x1, y1 + c->y1, x2 + c->x1, y2 + c->y1, color);
+}
+
+void draw_rectangle(canvas *c, int x1, int y1, int height, int width, COLORREF color)
+{
+    height++;
+    int i = 0;
+    for(; i < height; i++)
+    {
+        draw_line_offset(c, x1, y1 + i, x1 + width, y1 + i, color);
+    }
+}
+
+void fill_canvas(canvas *c, COLORREF color)
+{
+    draw_rectangle(c, 0, 0, c->height, c->width, color);
+}
+
+int abs(int value) { return value < 0 ? -value : value; }
+double absd(double value) { return value < 0 ? -value : value; }
+
+// Create a color with specifed HSV values
+COLORREF HSV(int hue, int saturation, int value)
+{
+    double r = 0.0, g = 0.0, b = 0.0;
+    double hueN = (hue / 255.0) * 360.0, satN = saturation / 255.0, valN = value / 255.0;
+    double chroma = valN * satN;
+    double hPrime = hueN / 60.0;
+    double mod = hPrime - ((int)hPrime / 2) * 2;
+    double x = chroma * (1 - absd(mod - 1.0));
+    switch((int)hPrime)
+    {
+        case 0:
+        {
+            r = chroma;
+            g = x;
+            b = 0;
+        }
+        break;
+        case 1:
+        {
+            r = x;
+            g = chroma;
+            b = 0;
+        }
+        break;
+        case 2:
+        {
+            r = 0;
+            g = chroma;
+            b = x;
+        }
+        break;
+        case 3:
+        {
+            r = 0;
+            g = x;
+            b = chroma;
+        }
+        break;
+        case 4:
+        {
+            r = x;
+            g = 0;
+            b = chroma;
+        }
+        break;
+        case 5:
+        case 6:
+        {
+            r = chroma;
+            g = 0;
+            b = x;
+        }
+        break;
+    }
+    double m = valN - chroma;
+    r = (r + m) * 255.0;
+    g = (g + m) * 255.0;
+    b = (b + m) * 255.0;
+    return RGB((int)r, (int)g, (int)b);
+}
+
+void draw_values(canvas* c, int values[], COLORREF background, COLORREF foreground[])
+{
+    draw_rectangle(c, 0, 0, c->height, c->width, background);
+    int i = 0;
+    int lineWidth = c->height / (2 * ARRAY_SIZE);
+    double step = (double)(c->width) / MAX_VALUE;
+    for(; i < ARRAY_SIZE; i++)
+    {
+        draw_rectangle(c, 0, lineWidth * i * 2, lineWidth, step * values[i], foreground[values[i]]);
+    }
+}
+void draw_swap(canvas *c, int index0, int index1, int value0, int value1, COLORREF background, COLORREF foreground[])
+{
+    int lineWidth = c->height / (2 * ARRAY_SIZE);
+    double step = (double)(c->width) / MAX_VALUE;
+
+    draw_rectangle(c, 0, lineWidth * index0 * 2, lineWidth, c->width, background);
+    draw_rectangle(c, 0, lineWidth * index1 * 2, lineWidth, c->width, background);
+    draw_rectangle(c, 0, lineWidth * index0 * 2, lineWidth, step * value0, foreground[value0]);
+    draw_rectangle(c, 0, lineWidth * index1 * 2, lineWidth, step * value1, foreground[value1]);
+}
+void draw_single_value(canvas* c, int index, int value, COLORREF background, COLORREF foreground[])
+{
+    int lineWidth = c->height / (2 * ARRAY_SIZE);
+    double step = (double)(c->width) / MAX_VALUE;
+    draw_rectangle(c, 0, lineWidth * index * 2, lineWidth, c->width, background);
+    draw_rectangle(c, 0, lineWidth * index * 2, lineWidth, step * value, foreground[value]);
+}
+
+void draw_control(canvas *c, int nice, COLORREF background, COLORREF foreground[])
+{
+    int height = c->height / 3;
+    double step = (double)(c->width - NICE_CONTROL_LEVEL_COUNT * NICE_VISUALIZATION_CELL_MARGIN) / (NICE_CONTROL_LEVEL_COUNT + 4);
+    int startX = step * 2;
+    int i = NICE_CONTROL_LEVEL_COUNT;
+    for(; i > nice; i--)
+    {
+        draw_rectangle(c, startX, height, height, step, foreground[i]);
+        startX += step;
+        startX += NICE_VISUALIZATION_CELL_MARGIN;
+    }
+    for(; i > 0; i--)
+    {
+        draw_rectangle(c, startX, height, height, step, background);
+        startX += step;
+        startX += NICE_VISUALIZATION_CELL_MARGIN;
+    }
+}
+
+// Sleep the thread for a specified amount of milliseconds 
+void mssleep(int ms)
+{
+    struct timespec t = { 0, ms * 1000000 };
+    nanosleep(&t, NULL);
+}
+
+void bubble_sort(void *p)
+{
+    sort_param data = *((sort_param*)p);
+    draw_values(&data.c, data.array, BACKGROUND, data.swatch);
+
+    int i = 1;
+    while (i < ARRAY_SIZE)
+    {
+        int j = i;
+        while(j > 0 && data.array[j - 1] > data.array[j])
+        {
+            int t = data.array[j];
+            data.array[j] = data.array[j - 1];
+            data.array[j - 1] = t;
+            draw_swap(&data.c, j, j - 1, data.array[j], data.array[j - 1], BACKGROUND, data.swatch);
+            mssleep(SWAP_SLEEP_MS);
+            j--;
+        }
+        i++;
+    }
+    task_exit(0);
+}
+void generate(sort_buffer *b)
+{
+    int i = 0;
+    for (; i < ARRAY_SIZE; i++)
+    {
+        b->array[i] = 0;
+    }
+    draw_values(&b->c, b->array, BACKGROUND, b->swatch);
+    for(i = 0; i < ARRAY_SIZE; i++)
+    {
+        b->array[i] = rand() % MAX_VALUE;
+        draw_single_value(&b->c, i, b->array[i], BACKGROUND, b->swatch);
+        mssleep(GENERATE_SLEEP_MS);
+    }
+}
+void bubble_sort_pc(sort_buffer *b)
+{
+    int i = 1;
+    while (i < ARRAY_SIZE)
+    {
+        int j = i;
+        while(j > 0 && b->array[j - 1] > b->array[j])
+        {
+            int t = b->array[j];
+            b->array[j] = b->array[j - 1];
+            b->array[j - 1] = t;
+            draw_swap(&b->c, j, j - 1, b->array[j], b->array[j - 1], BACKGROUND, b->swatch);
+            mssleep(SWAP_SLEEP_MS);
+            j--;
+        }
+        i++;
+    }
+}
+
+void quicksort_ex(void *p)
+{
+    sort_param data = *((sort_param*)p);
+    draw_values(&data.c, data.array, BACKGROUND, data.swatch);
+    quicksort(&data, 0, ARRAY_SIZE - 1);
+    task_exit(0);
+}
+void quicksort(sort_param *data, int lower, int upper)
+{
+    if(lower < upper)
+    {
+        int p = quicksort_part(data, lower, upper);
+        quicksort(data, lower, p - 1); // 98 97
+        quicksort(data, p + 1, upper); // 99 99
+    }
+}
+int quicksort_part(sort_param *data, int lower, int upper)
+{
+    int p = data->array[upper];
+    int i = lower;
+    int j = lower;
+    for(; j < upper; j++)
+    {
+        if(data->array[j] < p)
+        {
+            int t = data->array[i];
+            data->array[i] = data->array[j];
+            data->array[j] = t;
+            draw_swap(&(data->c), i, j, data->array[i], data->array[j], BACKGROUND, data->swatch);
+            mssleep(SWAP_SLEEP_MS);
+            i++;
+        }
+    }
+    int t = data->array[i];
+    data->array[i] = data->array[upper];
+    data->array[upper] = t;
+    draw_swap(&(data->c), i, upper, data->array[i], data->array[upper], BACKGROUND, data->swatch);
+    mssleep(SWAP_SLEEP_MS);
+    return i;
+}
+
+void select_sort(void *p)
+{
+    sort_param data = *((sort_param *)p);
+    draw_values(&data.c, data.array, BACKGROUND, data.swatch);
+    int i = 0;
+    for (; i < ARRAY_SIZE - 1; i++)
+    {
+        int j = i + 1, k = i;
+        for (; j < ARRAY_SIZE; j++)
+        {
+            if (data.array[j] < data.array[k])
+            {
+                k = j;
+            }
+        }
+        if (k != i)
+        {
+            int t = data.array[k];
+            data.array[k] = data.array[i];
+            data.array[i] = t;
+            draw_swap(&data.c, k, i, data.array[k], data.array[i], BACKGROUND, data.swatch);
+            mssleep(SWAP_SLEEP_MS);
+        }
+    }
+    task_exit(0);
+}
+
+void print_credits()
+{
+    int i = 0;
+    for(; i < 24; i++)
+    {
+        printf("\n");
+    }
+    mssleep(500);
+    printf("\t\t\t\t\t\t\t\t   David Lee");
+    mssleep(500);
+    printf("\n\t\t\t\t\t\t\t\t   20171717");
+    for(i = 0; i < 12; i++)
+    {
+        mssleep(500);
+        printf("\n");
+    }
+}
+
+int nice_inc(int tid)
+{
+    int nice = getprio(tid);
+    nice++;
+    if(nice > 0 && nice < NICE_CONTROL_LEVEL_COUNT) 
+    { 
+        int result = setprio(tid, nice);
+        if(result == 0) { return nice; }
+        else { return -1; }
+    }
+    return -1;
+}
+int nice_dec(int tid)
+{
+    int nice = getprio(tid);
+    nice--;
+    if(nice > -1) 
+    {
+        int result = setprio(tid, nice);
+        if(result == 0) { return nice; }
+        else { return -1; }
+    }
+    return -1;
+}
+
+void control_ex(void *p)
+{
+    control_param* params = (control_param*)p;
+    while(1)
+    {
+        int key = getchar();
+        int nice = -1, control = 0;
+        int controlNice = -1;
+        if(key == 0x4800) // Up
+        {
+            control = 0;
+            nice = nice_dec(params[control].task_id);
+        }
+        else if(key == 0x5000) // Down
+        {
+            control = 0;
+            nice = nice_inc(params[control].task_id);
+        }
+        else if(key == 0x4d00) // Right
+        {
+            control = 1;
+            nice = nice_dec(params[control].task_id);
+        }
+        else if(key == 0x4b00) // Left
+        {
+            control = 1;
+            nice = nice_inc(params[control].task_id);
+        }
+        if(nice < 0) { continue; }
+        draw_control(&(params[control].controlPanel), nice, NICE_VISUALIZATION_BACKGROUND, params[control].swatch);
+        int otherNice = getprio(params[control == 0 ? 1 : 0].task_id);
+        controlNice = min(nice, otherNice) - 2;
+        if(controlNice < 0) { controlNice = 0; }
+        else if(controlNice > NICE_CONTROL_LEVEL_COUNT - 1)
+        {
+            controlNice = NICE_CONTROL_LEVEL_COUNT - 1;
+        }
+        setprio(0, controlNice);
+        mssleep(50);
+    }
+    task_exit(0);
+}
+void producer_ex(void *p)
+{
+    con_pro_param* param = (con_pro_param*)p;
+    sort_buffer* b = (param->buffers);
+    while(1)
+    {
+        sem_wait(param->emptySem);
+        sem_wait(b->mutex);
+        generate(b);
+        sem_signal(b->mutex);
+        sem_signal(param->fullSem);
+        b = b->next;
+    }
+}
+void consumer_ex(void *p)
+{
+    con_pro_param* param = (con_pro_param*)p;
+    sort_buffer* b = (param->buffers);
+    while(1)
+    {
+        sem_wait(param->fullSem);
+        sem_wait(b->mutex);
+        bubble_sort_pc(b);
+        sem_signal(b->mutex);
+        sem_signal(param->emptySem);
+        b = b->next;
+    }
+}
